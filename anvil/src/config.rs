@@ -139,6 +139,8 @@ pub struct NodeConfig {
     pub ipc_path: Option<Option<String>>,
     /// Enable transaction/call steps tracing for debug calls returning geth-style traces
     pub enable_steps_tracing: bool,
+    /// Enable Firehose instrumentation output
+    pub firehose_enabled: bool,
     /// Configure the code size limit
     pub code_size_limit: Option<usize>,
     /// If set to true, remove historic state entirely
@@ -345,6 +347,7 @@ impl Default for NodeConfig {
             base_fee: None,
             enable_tracing: true,
             enable_steps_tracing: false,
+            firehose_enabled: false,
             no_storage_caching: false,
             server_config: Default::default(),
             host: None,
@@ -634,6 +637,13 @@ impl NodeConfig {
         self
     }
 
+    /// Sets whether to enable steps tracing
+    #[must_use]
+    pub fn with_firehose_enabled(mut self, firehose_enabled: bool) -> Self {
+        self.firehose_enabled = firehose_enabled;
+        self
+    }
+
     #[must_use]
     pub fn with_server_config(mut self, config: ServerConfig) -> Self {
         self.server_config = config;
@@ -672,7 +682,7 @@ impl NodeConfig {
             .expect("Failed writing json");
         }
         if self.silent {
-            return
+            return;
         }
 
         println!("{}", self.as_string(fork))
@@ -683,7 +693,7 @@ impl NodeConfig {
     /// See also [ Config::foundry_block_cache_file()]
     pub fn block_cache_path(&self) -> Option<PathBuf> {
         if self.no_storage_caching || self.eth_rpc_url.is_none() {
-            return None
+            return None;
         }
         // cache only if block explicitly set
         let block = self.fork_block_number?;
@@ -889,6 +899,8 @@ impl NodeConfig {
             genesis_init: self.genesis.clone(),
         };
 
+        println!("Block hash {:?}", env.block.number);
+
         // only memory based backend for now
         mem::Backend::with_genesis(
             db,
@@ -897,6 +909,7 @@ impl NodeConfig {
             fees,
             fork,
             self.enable_steps_tracing,
+            self.firehose_enabled,
             self.prune_history,
         )
         .await
@@ -996,7 +1009,7 @@ async fn find_latest_fork_block<M: Middleware>(provider: M) -> Result<u64, M::Er
     for _ in 0..2 {
         if let Some(block) = provider.get_block(num).await? {
             if block.hash.is_some() {
-                break
+                break;
             }
         }
         // block not actually finalized, so we try the block before
