@@ -11,11 +11,8 @@ use ethers::{
     utils::rlp::RlpStream,
 };
 use forge::revm::{self, CallScheme, CreateScheme, Database, TxEnv};
-use futures::future::Either;
 
-use crate::eth::{pool::transactions::PoolTransaction, util::HexDisplay};
-
-use super::executor::ExecutedTransaction;
+use crate::eth::pool::transactions::PoolTransaction;
 
 pub fn new_tracer(enabled: bool) -> Box<dyn Tracer> {
     if enabled {
@@ -78,7 +75,7 @@ pub trait Tracer: std::fmt::Debug + Send + Sync {
     fn end_block(&mut self, _block: &Block, _total_difficulty: U256) {}
 
     fn start_transaction(&mut self, _tx: &PoolTransaction) {}
-    fn record_start_transaction(&mut self, tx: &TxEnv) {}
+    fn record_start_transaction(&mut self, _tx: &TxEnv) {}
     fn end_transaction(
         &mut self,
         _cumulative_gas_used: U256,
@@ -98,7 +95,7 @@ pub trait Tracer: std::fmt::Debug + Send + Sync {
         _input: &bytes::Bytes,
     ) {
     }
-    fn end_call(&mut self, gas_left: u64, value: &Bytes) {}
+    fn end_call(&mut self, _gas_left: u64, _value: &bytes::Bytes) {}
 
     fn inspector<'a>(&'a mut self) -> Option<Inspector<'a>> {
         None
@@ -309,7 +306,7 @@ impl Tracer for PrinterTracer {
     fn end_transaction(
         &mut self,
         cumulative_gas_used: U256,
-        tx: &TransactionInfo,
+        _tx: &TransactionInfo,
         receipt: &TypedReceipt,
     ) {
         if self.active_tx_data.is_none() {
@@ -334,7 +331,8 @@ impl Tracer for PrinterTracer {
             logs = "[]"
         );
 
-        self.active_tx_data = None
+        self.active_tx_data = None;
+        self.active_tx_recorded = false;
 
         //     ctx.printer.Print(
         //         "END_APPLY_TRX",
@@ -424,7 +422,7 @@ impl Tracer for PrinterTracer {
         // }
     }
 
-    fn end_call(&mut self, gas_left: u64, return_value: &Bytes) {
+    fn end_call(&mut self, gas_left: u64, return_value: &bytes::Bytes) {
         if self.active_tx_data.is_none() {
             panic!("no active transaction on this tracer, this is invalid")
         }
@@ -587,7 +585,7 @@ impl<'a, DB: Database> revm::Inspector<DB> for Inspector<'a> {
     fn initialize_interp(
         &mut self,
         _interp: &mut revm::Interpreter,
-        data: &mut revm::EVMData<'_, DB>,
+        _data: &mut revm::EVMData<'_, DB>,
         _is_static: bool,
     ) -> revm::Return {
         revm::Return::Continue
@@ -652,6 +650,8 @@ impl<'a, DB: Database> revm::Inspector<DB> for Inspector<'a> {
         out: bytes::Bytes,
         _is_static: bool,
     ) -> (revm::Return, revm::Gas, bytes::Bytes) {
+        self.tracer.end_call(remaining_gas.remaining(), &out);
+
         (ret, remaining_gas, out)
     }
 
@@ -676,6 +676,7 @@ impl<'a, DB: Database> revm::Inspector<DB> for Inspector<'a> {
         remaining_gas: revm::Gas,
         out: bytes::Bytes,
     ) -> (revm::Return, Option<ethers::types::H160>, revm::Gas, bytes::Bytes) {
+        self.tracer.end_call(remaining_gas.remaining(), &out);
         (ret, address, remaining_gas, out)
     }
 
