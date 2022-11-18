@@ -72,8 +72,9 @@ use tokio::sync::RwLock as AsyncRwLock;
 use tracing::{trace, warn};
 use trie_db::{Recorder, Trie};
 
+use super::firehose;
+
 pub mod cache;
-pub mod firehose;
 pub mod fork_db;
 pub mod in_memory_db;
 pub mod inspector;
@@ -649,6 +650,7 @@ impl Backend {
             parent_hash: storage.best_hash,
             gas_used: U256::zero(),
             enable_steps_tracing: self.enable_steps_tracing,
+            firehose_tracer: &mut firehose::NoOpTracer {},
         };
 
         // create a new pending block
@@ -694,6 +696,8 @@ impl Backend {
 
             let (executed_tx, block_hash) = {
                 let mut db = self.db.write().await;
+                let mut tracer = self.firehose_tracer.lock();
+
                 let executor = TransactionExecutor {
                     db: &mut *db,
                     validator: self,
@@ -703,6 +707,7 @@ impl Backend {
                     parent_hash: best_hash,
                     gas_used: U256::zero(),
                     enable_steps_tracing: self.enable_steps_tracing,
+                    firehose_tracer: tracer.as_mut(),
                 };
                 let executed_tx = executor.execute();
 

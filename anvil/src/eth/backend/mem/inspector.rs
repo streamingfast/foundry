@@ -1,7 +1,7 @@
 //! Anvil specific [`revm::Inspector`] implementation
 
 use crate::{
-    eth::macros::node_info,
+    eth::{backend::firehose, macros::node_info},
     revm::{CreateInputs, Database, Interpreter},
 };
 use bytes::Bytes;
@@ -17,16 +17,17 @@ use std::{cell::RefCell, rc::Rc};
 
 /// The [`revm::Inspector`] used when transacting in the evm
 #[derive(Debug, Clone, Default)]
-pub struct Inspector {
+pub struct Inspector<'a> {
     pub gas: Option<Rc<RefCell<GasInspector>>>,
     pub tracer: Option<Tracer>,
     /// collects all `console.sol` logs
     pub logs: LogCollector,
+    pub firehose: Option<Rc<RefCell<firehose::Inspector<'a>>>>,
 }
 
 // === impl Inspector ===
 
-impl Inspector {
+impl<'a> Inspector<'a> {
     /// Called after the inspecting the evm
     ///
     /// This will log all `console.sol` logs
@@ -52,9 +53,15 @@ impl Inspector {
 
         self
     }
+
+    pub fn with_firehose_tracing(mut self, tracer: &'a mut dyn firehose::Tracer) -> Self {
+        self.firehose = tracer.inspector().map(|inspector| Rc::new(RefCell::new(inspector)));
+
+        self
+    }
 }
 
-impl<DB: Database> revm::Inspector<DB> for Inspector {
+impl<'a, DB: Database> revm::Inspector<DB> for Inspector<'a> {
     fn initialize_interp(
         &mut self,
         interp: &mut Interpreter,
@@ -63,7 +70,11 @@ impl<DB: Database> revm::Inspector<DB> for Inspector {
     ) -> Return {
         call_inspectors!(
             inspector,
-            [&mut self.gas.as_deref().map(|gas| gas.borrow_mut()), &mut self.tracer],
+            [
+                &mut self.gas.as_deref().map(|gas| gas.borrow_mut()),
+                &mut self.tracer,
+                &mut self.firehose.as_deref().map(|inspector| inspector.borrow_mut())
+            ],
             { inspector.initialize_interp(interp, data, is_static) }
         );
         Return::Continue
@@ -77,7 +88,11 @@ impl<DB: Database> revm::Inspector<DB> for Inspector {
     ) -> Return {
         call_inspectors!(
             inspector,
-            [&mut self.gas.as_deref().map(|gas| gas.borrow_mut()), &mut self.tracer],
+            [
+                &mut self.gas.as_deref().map(|gas| gas.borrow_mut()),
+                &mut self.tracer,
+                &mut self.firehose.as_deref().map(|inspector| inspector.borrow_mut())
+            ],
             {
                 inspector.step(interp, data, is_static);
             }
@@ -97,7 +112,8 @@ impl<DB: Database> revm::Inspector<DB> for Inspector {
             [
                 &mut self.gas.as_deref().map(|gas| gas.borrow_mut()),
                 &mut self.tracer,
-                Some(&mut self.logs)
+                Some(&mut self.logs),
+                &mut self.firehose.as_deref().map(|inspector| inspector.borrow_mut())
             ],
             {
                 inspector.log(evm_data, address, topics, data);
@@ -114,7 +130,11 @@ impl<DB: Database> revm::Inspector<DB> for Inspector {
     ) -> Return {
         call_inspectors!(
             inspector,
-            [&mut self.gas.as_deref().map(|gas| gas.borrow_mut()), &mut self.tracer],
+            [
+                &mut self.gas.as_deref().map(|gas| gas.borrow_mut()),
+                &mut self.tracer,
+                &mut self.firehose.as_deref().map(|inspector| inspector.borrow_mut())
+            ],
             {
                 inspector.step_end(interp, data, is_static, eval);
             }
@@ -133,7 +153,8 @@ impl<DB: Database> revm::Inspector<DB> for Inspector {
             [
                 &mut self.gas.as_deref().map(|gas| gas.borrow_mut()),
                 &mut self.tracer,
-                Some(&mut self.logs)
+                Some(&mut self.logs),
+                &mut self.firehose.as_deref().map(|inspector| inspector.borrow_mut())
             ],
             {
                 inspector.call(data, call, is_static);
@@ -154,7 +175,11 @@ impl<DB: Database> revm::Inspector<DB> for Inspector {
     ) -> (Return, Gas, Bytes) {
         call_inspectors!(
             inspector,
-            [&mut self.gas.as_deref().map(|gas| gas.borrow_mut()), &mut self.tracer],
+            [
+                &mut self.gas.as_deref().map(|gas| gas.borrow_mut()),
+                &mut self.tracer,
+                &mut self.firehose.as_deref().map(|inspector| inspector.borrow_mut())
+            ],
             {
                 inspector.call_end(data, inputs, remaining_gas, ret, out.clone(), is_static);
             }
@@ -169,7 +194,11 @@ impl<DB: Database> revm::Inspector<DB> for Inspector {
     ) -> (Return, Option<Address>, Gas, Bytes) {
         call_inspectors!(
             inspector,
-            [&mut self.gas.as_deref().map(|gas| gas.borrow_mut()), &mut self.tracer],
+            [
+                &mut self.gas.as_deref().map(|gas| gas.borrow_mut()),
+                &mut self.tracer,
+                &mut self.firehose.as_deref().map(|inspector| inspector.borrow_mut())
+            ],
             {
                 inspector.create(data, call);
             }
@@ -189,7 +218,11 @@ impl<DB: Database> revm::Inspector<DB> for Inspector {
     ) -> (Return, Option<Address>, Gas, Bytes) {
         call_inspectors!(
             inspector,
-            [&mut self.gas.as_deref().map(|gas| gas.borrow_mut()), &mut self.tracer],
+            [
+                &mut self.gas.as_deref().map(|gas| gas.borrow_mut()),
+                &mut self.tracer,
+                &mut self.firehose.as_deref().map(|inspector| inspector.borrow_mut())
+            ],
             {
                 inspector.create_end(data, inputs, status, address, gas, retdata.clone());
             }

@@ -27,6 +27,8 @@ use foundry_evm::{
 use std::sync::Arc;
 use tracing::{trace, warn};
 
+use super::firehose;
+
 /// Represents an executed transaction (transacted on the DB)
 pub struct ExecutedTransaction {
     transaction: Arc<PoolTransaction>,
@@ -98,6 +100,7 @@ pub struct TransactionExecutor<'a, Db: ?Sized, Validator: TransactionValidator> 
     /// Cumulative gas used by all executed transactions
     pub gas_used: U256,
     pub enable_steps_tracing: bool,
+    pub firehose_tracer: &'a mut dyn firehose::Tracer,
 }
 
 impl<'a, DB: Db + ?Sized, Validator: TransactionValidator> TransactionExecutor<'a, DB, Validator> {
@@ -122,7 +125,7 @@ impl<'a, DB: Db + ?Sized, Validator: TransactionValidator> TransactionExecutor<'
             None
         };
 
-        for tx in self.into_iter() {
+        while let Some(tx) = (&mut self).next() {
             let tx = match tx {
                 TransactionExecutionOutcome::Executed(tx) => {
                     included.push(tx.transaction.clone());
@@ -131,15 +134,16 @@ impl<'a, DB: Db + ?Sized, Validator: TransactionValidator> TransactionExecutor<'
                 TransactionExecutionOutcome::Exhausted(_) => continue,
                 TransactionExecutionOutcome::Invalid(tx, _) => {
                     invalid.push(tx);
-                    continue
+                    continue;
                 }
                 TransactionExecutionOutcome::DatabaseError(_, err) => {
                     // Note: this is only possible in forking mode, if for example a rpc request
                     // failed
                     trace!(target: "backend", ?err,  "Failed to execute transaction due to database error");
-                    continue
+                    continue;
                 }
             };
+
             let receipt = tx.create_receipt();
             cumulative_gas_used = cumulative_gas_used.saturating_add(receipt.gas_used());
             let ExecutedTransaction { transaction, logs, out, traces, exit_reason: exit, .. } = tx;
@@ -169,6 +173,8 @@ impl<'a, DB: Db + ?Sized, Validator: TransactionValidator> TransactionExecutor<'
                     _ => None,
                 },
             };
+
+            self.firehose_tracer.end_transaction(cumulative_gas_used, &info, &receipt);
 
             transaction_infos.push(info);
             receipts.push(receipt);
@@ -233,7 +239,7 @@ impl<'a, 'b, DB: Db + ?Sized, Validator: TransactionValidator> Iterator
         // check that we comply with the block's gas limit
         let max_gas = self.gas_used.saturating_add(U256::from(env.tx.gas_limit));
         if max_gas > env.block.gas_limit {
-            return Some(TransactionExecutionOutcome::Exhausted(transaction))
+            return Some(TransactionExecutionOutcome::Exhausted(transaction));
         }
 
         // validate before executing
@@ -243,15 +249,18 @@ impl<'a, 'b, DB: Db + ?Sized, Validator: TransactionValidator> Iterator
             &env,
         ) {
             warn!(target: "backend", "Skipping invalid tx execution [{:?}] {}", transaction.hash(), err);
-            return Some(TransactionExecutionOutcome::Invalid(transaction, err))
+            return Some(TransactionExecutionOutcome::Invalid(transaction, err));
         }
+
+        self.firehose_tracer.start_transaction(&transaction);
 
         let mut evm = revm::EVM::new();
         evm.env = env;
         evm.database(&mut self.db);
 
         // records all call and step traces
-        let mut inspector = Inspector::default().with_tracing();
+        let mut inspector =
+            Inspector::default().with_tracing().with_firehose_tracing(self.firehose_tracer);
         if self.enable_steps_tracing {
             inspector = inspector.with_steps_tracing();
         }
