@@ -209,6 +209,10 @@ impl Tracer for PrinterTracer {
             total_ordering = 0,
         );
 
+        eprintln!("FIRE TRX_FROM {from:x}",
+            from = tx.caller,
+        );
+
         self.active_tx_recorded = true;
 
         //         Hash(hash),
