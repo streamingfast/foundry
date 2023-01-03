@@ -2,7 +2,7 @@ use std::fmt::Display;
 
 use anvil_core::eth::{
     block::{Block, Header},
-    receipt::TypedReceipt,
+    receipt::{Log, TypedReceipt},
     transaction::TransactionInfo,
 };
 use ethers::{
@@ -96,6 +96,8 @@ pub trait Tracer: std::fmt::Debug + Send + Sync {
     ) {
     }
     fn end_call(&mut self, _gas_left: u64, _value: &bytes::Bytes) {}
+
+    fn record_log(&mut self, _address: &H160, _topics: &[H256], _data: &bytes::Bytes) {}
 
     fn inspector<'a>(&'a mut self) -> Option<Inspector<'a>> {
         None
@@ -202,10 +204,12 @@ impl Tracer for PrinterTracer {
             gas_price = tx.gas_price,
             nonce = tx.nonce.unwrap_or(0),
             data = Hex(&tx.data),
+            // TODO: AccessList encoding to Firehose format
             access_list = "00",
-            max_fee_per_gas = tx.gas_priority_fee.as_ref().map(ToString::to_string).unwrap_or(".".to_string()),
-            max_priority_fee_per_gas = "",
-            tx_type = 0,
+            max_fee_per_gas = tx_data.max_fee_per_gas.as_ref().map(ToString::to_string).unwrap_or(".".to_string()),
+            max_priority_fee_per_gas = tx_data.max_priority_fee_per_gas.as_ref().map(ToString::to_string).unwrap_or(".".to_string()),
+            tx_type = tx_data.tx_type.as_u8(),
+            // FIXME: Implement total ordering
             total_ordering = 0,
         );
 
@@ -326,13 +330,24 @@ impl Tracer for PrinterTracer {
         //         }
         //     }
 
-        eprintln!("FIRE END_APPLY_TRX {gas_used} {post_state} {cumulative_gas_used} {bloom:x} {total_order} {logs}",
+        let logs: Vec<_> = receipt
+            .logs()
+            .iter()
+            .map(|log| FirehoseLogItem { address: &log.address, data: &log.data })
+            .collect();
+
+        let logs_data =
+            serde_json::to_string(&logs).expect("should have been enable to serialize logs data");
+
+        eprintln!("FIRE END_APPLY_TRX {gas_used} {post_state} {cumulative_gas_used} {bloom:x} {total_ordering} {logs}",
             gas_used = receipt.gas_used(),
-            post_state =".",
+            // FIXME: Implement post_state retrieval
+            post_state = ".",
             cumulative_gas_used = cumulative_gas_used,
             bloom = receipt.logs_bloom(),
-            total_order = 0,
-            logs = "[]"
+            // FIXME: Implement total ordering
+            total_ordering = 0,
+            logs = logs_data,
         );
 
         self.active_tx_data = None;
@@ -463,14 +478,71 @@ impl Tracer for PrinterTracer {
         // }
     }
 
+    fn record_log(&mut self, address: &H160, topics: &[H256], data: &bytes::Bytes) {
+        // func (ctx *Context) RecordLog(log *types.Log) {
+        //     if ctx == nil {
+        //         return
+        //     }
+
+        //     strtopics := make([]string, len(log.Topics))
+        //     for idx, topic := range log.Topics {
+        //         strtopics[idx] = Hash(topic)
+        //     }
+
+        //     ctx.printer.Print("ADD_LOG",
+        //         ctx.callIndex(),
+        //         ctx.logIndexInBlock(),
+        //         Addr(log.Address),
+        //         strings.Join(strtopics, ","),
+        //         Hex(log.Data),
+        //         Uint64(ctx.totalOrderingCounter.Inc()),
+        //     )
+        // }
+
+        let topics_strings: Vec<String> =
+            topics.iter().map(|topic| format!("{}", Hex(topic.as_bytes()))).collect();
+
+        eprintln!("FIRE ADD_LOG {call_index} {block_log_index} {address:x} {topics} {data} {total_ordering}",
+            call_index = self.active_call_index,
+            // Still logged but unsued on the reader side, re-computed there because we have some logs here that will be reverted, so block index
+            // will be known only at a later point
+            block_log_index = 0,
+            address = address,
+            topics = topics_strings.join(","),
+            data = Hex(data),
+            total_ordering = 0,
+        );
+    }
+
     fn inspector<'a>(&'a mut self) -> Option<Inspector<'a>> {
         Some(Inspector { tracer: self })
     }
 }
 
-#[derive(serde::Serialize, Debug, Default)]
+#[derive(Debug, Default)]
+enum TxType {
+    #[default]
+    Legacy,
+    AccessList,
+    DynamicFee,
+}
+
+impl TxType {
+    fn as_u8(&self) -> u8 {
+        match self {
+            TxType::Legacy => 0,
+            TxType::AccessList => 1,
+            TxType::DynamicFee => 2,
+        }
+    }
+}
+
+#[derive(Debug, Default)]
 struct TxData {
+    tx_type: TxType,
     hash: H256,
+    max_fee_per_gas: Option<U256>,
+    max_priority_fee_per_gas: Option<U256>,
     v: u64,
     r: H256,
     s: H256,
@@ -480,23 +552,41 @@ impl Into<TxData> for &PoolTransaction {
     fn into(self) -> TxData {
         use anvil_core::eth::transaction::TypedTransaction;
 
-        let (v, r, s) = match &self.pending_transaction.transaction {
-            TypedTransaction::Legacy(tx) => {
-                let sig = tx.signature;
+        let (tx_type, max_fee_per_gas, max_priority_fee_per_gas, v, r, s) =
+            match &self.pending_transaction.transaction {
+                TypedTransaction::Legacy(tx) => {
+                    let sig = tx.signature;
 
-                let mut r_bytes = [0u8; 32];
-                sig.r.to_big_endian(&mut r_bytes);
+                    let mut r_bytes = [0u8; 32];
+                    sig.r.to_big_endian(&mut r_bytes);
 
-                let mut s_bytes = [0u8; 32];
-                sig.s.to_big_endian(&mut s_bytes);
+                    let mut s_bytes = [0u8; 32];
+                    sig.s.to_big_endian(&mut s_bytes);
 
-                (sig.v, r_bytes.into(), s_bytes.into())
-            }
-            TypedTransaction::EIP2930(tx) => (tx.odd_y_parity as u64, tx.r, tx.s),
-            TypedTransaction::EIP1559(tx) => (tx.odd_y_parity as u64, tx.r, tx.s),
-        };
+                    (TxType::Legacy, None, None, sig.v, r_bytes.into(), s_bytes.into())
+                }
+                TypedTransaction::EIP2930(tx) => {
+                    (TxType::AccessList, None, None, tx.odd_y_parity as u64, tx.r, tx.s)
+                }
+                TypedTransaction::EIP1559(tx) => (
+                    TxType::DynamicFee,
+                    Some(tx.max_fee_per_gas),
+                    Some(tx.max_priority_fee_per_gas),
+                    tx.odd_y_parity as u64,
+                    tx.r,
+                    tx.s,
+                ),
+            };
 
-        TxData { hash: self.hash().clone(), v, r, s }
+        TxData {
+            hash: self.hash().clone(),
+            tx_type,
+            max_fee_per_gas,
+            max_priority_fee_per_gas,
+            v,
+            r,
+            s,
+        }
     }
 }
 
@@ -511,6 +601,30 @@ struct EndBlockData<'a> {
     #[serde(rename = "totalDifficulty")]
     total_difficulty: &'a U256,
 }
+
+#[derive(serde::Serialize)]
+pub struct FirehoseLogItem<'a> {
+    #[serde(rename = "address")]
+    pub address: &'a Address,
+
+    #[serde(rename = "data")]
+    pub data: &'a Bytes,
+}
+
+impl<'a> Into<FirehoseLogItem<'a>> for &'a Log {
+    fn into(self) -> FirehoseLogItem<'a> {
+        FirehoseLogItem { address: &self.address, data: &self.data }
+    }
+}
+
+//     logItems := make([]logItem, len(receipt.Logs))
+//     for i, log := range receipt.Logs {
+//         logItems[i] = logItem{
+//             "address": log.Address,
+//             "topics":  log.Topics,
+//             "data":    hexutil.Bytes(log.Data),
+//         }
+//     }
 
 #[derive(serde::Serialize)]
 pub struct FirehoseHeader<'a> {
@@ -607,10 +721,11 @@ impl<'a, DB: Database> revm::Inspector<DB> for Inspector<'a> {
     fn log(
         &mut self,
         _evm_data: &mut revm::EVMData<'_, DB>,
-        _address: &ethers::types::H160,
-        _topics: &[H256],
-        _data: &bytes::Bytes,
+        address: &ethers::types::H160,
+        topics: &[H256],
+        data: &bytes::Bytes,
     ) {
+        self.tracer.record_log(address, topics, data);
     }
 
     fn step_end(
